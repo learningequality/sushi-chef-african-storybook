@@ -75,9 +75,10 @@ class AfricanStorybookChef(SushiChef):
             title = channel_info['CHANNEL_TITLE'],
             thumbnail = channel_info.get('CHANNEL_THUMBNAIL'),
             description = channel_info.get('CHANNEL_DESCRIPTION'),
+            language= "en",
         )
 
-        #download_book("http://www.africanstorybook.org/reader.php?id=16451", "16451", "title", "author", "description", ["en"])
+        #download_book("http://www.africanstorybook.org/reader.php?id=16451", "16451", "title", "author", "description", "en")
 
         # Download the books into a dict {language: [list of books]}
         channel_tree = download_all()
@@ -107,6 +108,8 @@ class AfricanStorybookChef(SushiChef):
 
 
 def download_all():
+    scraped_ids = set()
+
     with WebDriver("http://www.africanstorybook.org/", delay=20000) as driver:
         books = driver.execute_script("return bookItems;")
         total_books = len(books)
@@ -120,6 +123,10 @@ def download_all():
         channel_tree = defaultdict(lambda: defaultdict(list))
         for i, book in enumerate(books):
             book_id = book["id"]
+            if book_id in scraped_ids:
+                continue
+            scraped_ids.add(book_id)
+
             book_url = "http://www.africanstorybook.org/reader.php?id=%s" % book_id
             print("Downloading book %s of %s with url %s" % (i + 1, total_books, book_url))
 
@@ -130,26 +137,21 @@ def download_all():
             title = strip_level_from_title(html.unescape(book["title"]))
             description = html.unescape(book["summary"])
 
-            book, languages = download_book(book_url, book_id, title, author, description, languages)
+            for language in languages:
+                book = download_book(book_url, book_id, title, author, description, language)
 
-            if book:
-                print("... downloaded a Level %s %s book titled %s" % (
-                    level, "/".join(languages), title))
-                for language in languages:
+                if book:
+                    print("... downloaded a Level %s %s book titled %s" % (
+                        level, language, title))
                     channel_tree[language][level].append(book)
-            else:
-                print("... WARNING: book not found")
+                else:
+                    print("... WARNING: book not found")
 
     return channel_tree
 
 
-def download_book(book_url, book_id, title, author, description, languages):
-    """Downloads a single book from the African Storybook website given its URL.
-
-    Return a tuple of (
-        the downloaded book as an HTML5AppNode,
-        the languages of the book as a list of strings).
-    """
+def download_book(book_url, book_id, title, author, description, language):
+    """Downloads a single book from African Storybook website given its URL."""
     # -- 0. Parse --
 
     doc = get_parsed_html_from_url(book_url)
@@ -161,12 +163,6 @@ def download_book(book_url, book_id, title, author, description, languages):
 
     # Extract copyright holder.
     copyright_holder = str(doc.select_one(".backcover_copyright").contents[0]).strip(" ©")
-
-    # Extract the language if we didn't get it already.
-    if not languages:
-        author_text_lines = replace_br_with_newlines(doc.select_one(".bookcover_author")).split("\n")
-        language_raw = next(l for l in author_text_lines if l.startswith("Language"))
-        languages = [language_raw.strip("Language").strip(" -")]
 
     # -- 2. Modify and write files --
 
@@ -197,7 +193,7 @@ def download_book(book_url, book_id, title, author, description, languages):
 
     zip_path = create_predictable_zip(destination)
     return nodes.HTML5AppNode(
-        source_id=book_id,
+        source_id="%s|%s" % (book_id, language),
         title=truncate_metadata(title),
         license=licenses.CC_BYLicense(
             copyright_holder=truncate_metadata(copyright_holder)),
@@ -205,8 +201,8 @@ def download_book(book_url, book_id, title, author, description, languages):
         author=truncate_metadata(author),
         thumbnail=thumbnail,
         files=[files.HTMLZipFile(zip_path)],
-        language=getlang_by_name(languages[0]),
-    ), languages
+        language=getlang_by_name(language),
+    )
 
 
 def strip_level_from_title(title):
@@ -221,6 +217,7 @@ def truncate_metadata(data_string):
 
 
 FONT_SRC_RE = re.compile(r"src:\W?url\(.*?fonts/(.*?)['\"]?\)")
+UP_DIR_IMG_RE = re.compile(r"url\(['\"]?../im.*?\)")
 BG_IMG_RE = re.compile("background-image:url\((.*)\)")
 
 with open("resources/font_sizing.css") as f:
@@ -260,8 +257,11 @@ def download_static_assets(doc, destination):
                 filename = match.groups()[0]
                 url = make_fully_qualified_url("fonts/%s" % filename)
                 download_file(url, destination, request_fn=make_request)
-
             processed_css = FONT_SRC_RE.sub(r"src: url('\1')", content)
+
+            # ... and we don't need references to images. Remove them else they
+            # may cause a 500 on the server.
+            processed_css = UP_DIR_IMG_RE.sub('url("")', content)
 
             # ... and then append additional CSS to reduce font sizing to fit
             # better on shorter screens (for previewing in Kolibri's iframe
